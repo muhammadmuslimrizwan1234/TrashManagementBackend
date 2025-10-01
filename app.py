@@ -136,10 +136,16 @@ def upload_dataset_image():
         "results": results
     }), 201
 
-# Get categories
+# ---------------- Get Categories ----------------
 @app.route("/api/categories", methods=["GET"])
 def categories():
-    return jsonify(get_categories()), 200
+    try:
+        cats = get_categories()
+        # Ensure response is always a dict
+        return jsonify({"categories": cats}), 200
+    except Exception as e:
+        print("❌ Error in /api/categories:", str(e))
+        return jsonify({"error": str(e)}), 500
 
 # List dataset images
 @app.route("/api/dataset_images", methods=["GET"])
