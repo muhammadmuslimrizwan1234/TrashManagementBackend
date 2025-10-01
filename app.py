@@ -96,56 +96,66 @@ def predict():
     return jsonify(response), 201
 
 # ---------------- Dataset Management ----------------
+# ---------------- Dataset Management ----------------
 @app.route("/api/upload_dataset_image", methods=["POST"])
 def upload_dataset_image():
     if "files" not in request.files and "file" not in request.files:
         return jsonify({"error": "No file(s) uploaded"}), 400
 
+    # Support multiple or single file
     files = request.files.getlist("files") if "files" in request.files else [request.files["file"]]
 
-    # Expect hierarchy as JSON string or multiple form values
-    hierarchy_raw = request.form.get("hierarchy")
-    try:
-        if hierarchy_raw:
-            hierarchy = json.loads(hierarchy_raw) if isinstance(hierarchy_raw, str) else hierarchy_raw
-        else:
-            # Fallback: build from main/sub/subsub
-            hierarchy = [x for x in [request.form.get("main"), request.form.get("sub"), request.form.get("subsub")] if x]
-    except Exception:
-        return jsonify({"error": "Invalid hierarchy format"}), 400
+    # Convert form hierarchy to list
+    hierarchy_list = [h for h in [
+        request.form.get("main"),
+        request.form.get("sub"),
+        request.form.get("subsub")
+    ] if h]
 
-    if not hierarchy or not isinstance(hierarchy, list):
-        return jsonify({"error": "Hierarchy list required"}), 400
+    if not hierarchy_list:
+        return jsonify({"error": "At least one category (main) required"}), 400
 
     results = []
     for file in files:
         try:
-            file_id, hash_value = save_to_dataset(file, hierarchy)
-            remove_duplicate_from_other_categories(db, hash_value, file_id, hierarchy)
+            print(f"📂 Uploading file: {file.filename} → hierarchy: {hierarchy_list}")
 
+            # Save to Drive
+            file_id, hash_value = save_to_dataset(file, hierarchy_list)
+            print(f"✅ File uploaded to Drive. ID={file_id}, hash={hash_value}")
+
+            # Remove duplicates if needed
+            remove_duplicate_from_other_categories(db, hash_value, file_id, hierarchy_list)
+
+            # Save record in MongoDB
             record = {
                 "file_id": file_id,
-                "hierarchy": hierarchy,
+                "hierarchy": hierarchy_list,
                 "hash": hash_value,
                 "uploaded_by": request.form.get("user", "admin"),
                 "timestamp": datetime.utcnow()
             }
             db["dataset_images"].insert_one(record)
+            print(f"🗄️ Mongo record inserted: {record}")
 
             results.append({
                 "message": "Image added",
                 "file_id": file_id,
                 "image_url": f"https://drive.google.com/uc?id={file_id}",
-                "hierarchy": hierarchy
+                "hierarchy": hierarchy_list
             })
+
         except Exception as e:
-            results.append({"error": str(e)})
+            print(f"❌ Error uploading {file.filename}: {e}")
+            results.append({
+                "message": f"Failed to upload {file.filename}",
+                "error": str(e)
+            })
 
     return jsonify({
-        "uploaded": len([r for r in results if "error" not in r]),
+        "uploaded": len([r for r in results if "file_id" in r]),
         "results": results
     }), 201
-
 
 # ---------------- Get Categories ----------------
 @app.route("/api/categories", methods=["GET"])
