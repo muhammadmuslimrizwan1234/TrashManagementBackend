@@ -8,9 +8,10 @@ from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 
 # ---------------- Utils ----------------
-from utils.file_utils import save_to_dataset, remove_duplicate_from_other_categories, delete_drive_file, delete_drive_folder
 from utils.category_utils import get_categories
-from utils.drive_utils import get_drive_client, ensure_drive_folder
+from utils.file_utils import save_to_dataset, remove_duplicate_from_other_categories
+from utils.drive_utils import delete_drive_file
+
 from models import classifier  # will lazy-load TensorFlow
 
 # ---------------- Load Env ----------------
