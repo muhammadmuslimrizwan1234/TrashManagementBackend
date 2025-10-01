@@ -1,48 +1,36 @@
+from pymongo import MongoClient
+import certifi
 import os
-from utils.drive_utils import get_drive_client, list_drive_folders
 
-# Root dataset folder (Google Drive ID)
-DRIVE_DATASET_ID = os.getenv("DRIVE_DATASET_ID")
+MONGO_URI = os.getenv("MONGO_URI")
+DB_NAME = os.getenv("DB_NAME", "TrashApp")
+client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+db = client[DB_NAME]
 
 def get_categories():
     """
-    Fetch dataset categories from Google Drive.
-    Returns a list of dicts in a clean hierarchy format:
-    [
-        {"main": "glass", "sub": None, "subsub": None},
-        {"main": "plastic", "sub": "PET", "subsub": None},
-        {"main": "metal", "sub": "aluminum", "subsub": "cans"}
-    ]
+    Builds a nested category tree from dataset_images collection.
+    Example:
+    {
+        "metal": {
+            "zinc": {},
+            "iron": {}
+        },
+        "plastic": {
+            "pp": {}
+        },
+        "glass": {}
+    }
     """
-    if not DRIVE_DATASET_ID:
-        raise ValueError("DRIVE_DATASET_ID not configured in environment")
+    categories = {}
 
-    drive = get_drive_client()
-
-    categories = []
-
-    # Level 1: Main categories
-    mains = list_drive_folders(drive, DRIVE_DATASET_ID)
-    for main in mains:
-        main_name = main["title"]
-
-        # Level 2: Sub categories
-        subs = list_drive_folders(drive, main["id"])
-        if not subs:
-            categories.append({"main": main_name, "sub": None, "subsub": None})
-            continue
-
-        for sub in subs:
-            sub_name = sub["title"]
-
-            # Level 3: Sub-sub categories
-            subsubs = list_drive_folders(drive, sub["id"])
-            if not subsubs:
-                categories.append({"main": main_name, "sub": sub_name, "subsub": None})
-                continue
-
-            for subsub in subsubs:
-                subsub_name = subsub["title"]
-                categories.append({"main": main_name, "sub": sub_name, "subsub": subsub_name})
+    images = db["dataset_images"].find({}, {"hierarchy": 1, "_id": 0})
+    for img in images:
+        hierarchy = img.get("hierarchy", [])
+        node = categories
+        for level in hierarchy:
+            if level not in node:
+                node[level] = {}
+            node = node[level]
 
     return categories

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 # ---------------- Utils ----------------
 from utils.file_utils import save_to_dataset, remove_duplicate_from_other_categories, delete_drive_file, delete_drive_folder
 from utils.category_utils import get_categories
+from utils.drive_utils import get_drive_client, ensure_drive_folder
 from models import classifier  # will lazy-load TensorFlow
 
 # ---------------- Load Env ----------------
@@ -101,47 +102,55 @@ def upload_dataset_image():
 
     files = request.files.getlist("files") if "files" in request.files else [request.files["file"]]
 
-    hierarchy = {
-        "main": request.form.get("main"),
-        "sub": request.form.get("sub"),
-        "subsub": request.form.get("subsub"),
-    }
+    # Expect hierarchy as JSON string or multiple form values
+    hierarchy_raw = request.form.get("hierarchy")
+    try:
+        if hierarchy_raw:
+            hierarchy = json.loads(hierarchy_raw) if isinstance(hierarchy_raw, str) else hierarchy_raw
+        else:
+            # Fallback: build from main/sub/subsub
+            hierarchy = [x for x in [request.form.get("main"), request.form.get("sub"), request.form.get("subsub")] if x]
+    except Exception:
+        return jsonify({"error": "Invalid hierarchy format"}), 400
 
-    if not hierarchy["main"]:
-        return jsonify({"error": "Main category required"}), 400
+    if not hierarchy or not isinstance(hierarchy, list):
+        return jsonify({"error": "Hierarchy list required"}), 400
 
     results = []
     for file in files:
-        file_id, hash_value = save_to_dataset(file, hierarchy)
-        remove_duplicate_from_other_categories(db, hash_value, file_id, hierarchy)
+        try:
+            file_id, hash_value = save_to_dataset(file, hierarchy)
+            remove_duplicate_from_other_categories(db, hash_value, file_id, hierarchy)
 
-        record = {
-            "file_id": file_id,
-            "hierarchy": hierarchy,
-            "hash": hash_value,
-            "uploaded_by": request.form.get("user", "admin"),
-            "timestamp": datetime.utcnow()
-        }
-        db["dataset_images"].insert_one(record)
+            record = {
+                "file_id": file_id,
+                "hierarchy": hierarchy,
+                "hash": hash_value,
+                "uploaded_by": request.form.get("user", "admin"),
+                "timestamp": datetime.utcnow()
+            }
+            db["dataset_images"].insert_one(record)
 
-        results.append({
-            "message": "Image added",
-            "file_id": file_id,
-            "image_url": f"https://drive.google.com/uc?id={file_id}",
-            "hierarchy": hierarchy
-        })
+            results.append({
+                "message": "Image added",
+                "file_id": file_id,
+                "image_url": f"https://drive.google.com/uc?id={file_id}",
+                "hierarchy": hierarchy
+            })
+        except Exception as e:
+            results.append({"error": str(e)})
 
     return jsonify({
-        "uploaded": len(results),
+        "uploaded": len([r for r in results if "error" not in r]),
         "results": results
     }), 201
+
 
 # ---------------- Get Categories ----------------
 @app.route("/api/categories", methods=["GET"])
 def categories():
     try:
         cats = get_categories()
-        # Ensure response is always a dict
         return jsonify({"categories": cats}), 200
     except Exception as e:
         print("❌ Error in /api/categories:", str(e))
@@ -169,36 +178,43 @@ def delete_dataset_image(hash_value):
     db["dataset_images"].delete_one({"hash": hash_value})
     return jsonify({"message": "Image deleted"}), 200
 
-# Delete category
 @app.route("/api/delete_category", methods=["POST"])
 def delete_category():
     data = request.json
-    main = data.get("main")
-    sub = data.get("sub")
-    subsub = data.get("subsub")
+    hierarchy = data.get("hierarchy")
 
-    if not main:
-        return jsonify({"error": "main required"}), 400
+    if not hierarchy or not isinstance(hierarchy, list):
+        return jsonify({"error": "Hierarchy list required"}), 400
 
-    from utils.drive_utils import get_drive_client, ensure_drive_folder
+    from utils.drive_utils import get_drive_client, ensure_drive_folder, delete_drive_folder
     drive = get_drive_client()
 
-    parent = ensure_drive_folder(drive, DRIVE_DATASET_ID, main)
-    target = parent
-    if sub:
-        target = ensure_drive_folder(drive, parent["id"], sub)
-    if subsub:
-        target = ensure_drive_folder(drive, target["id"], subsub)
+    try:
+        parent = {"id": DRIVE_DATASET_ID}
+        target = None
 
-    delete_drive_folder(target["id"])
+        # Traverse until last level
+        for level in hierarchy:
+            target = ensure_drive_folder(drive, parent["id"], level)
+            parent = target
 
-    db["dataset_images"].delete_many({
-        "hierarchy.main": main,
-        "hierarchy.sub": sub,
-        "hierarchy.subsub": subsub
-    })
+        if not target:
+            return jsonify({"error": "Target folder not found"}), 404
 
-    return jsonify({"message": "Category deleted"}), 200
+        # ❌ Only delete the last folder in hierarchy
+        delete_drive_folder(target["id"])
+
+        # 🗑 Delete DB entries for this exact hierarchy
+        db["dataset_images"].delete_many({"hierarchy": hierarchy})
+
+        return jsonify({
+            "message": "Deleted last category",
+            "deleted": hierarchy[-1],
+            "parent": hierarchy[:-1] if len(hierarchy) > 1 else None
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ---------------- Main ----------------

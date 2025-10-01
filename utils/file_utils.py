@@ -2,52 +2,62 @@ import os
 import tempfile
 from werkzeug.utils import secure_filename
 from utils.hash_utils import get_image_hash
-from utils.drive_utils import get_drive_client, ensure_drive_folder, upload_to_drive, delete_drive_file, delete_drive_folder, DATASET_FOLDER_ID
+from utils.drive_utils import (
+    get_drive_client, ensure_drive_folder,
+    upload_to_drive, delete_drive_file, DATASET_FOLDER_ID
+)
 
-def save_to_dataset(file, hierarchy):
+def save_to_dataset(file, hierarchy_list):
     """
-    Save uploaded image into Drive under hierarchy folders.
-    Returns (file_id, hash_value).
+    Save uploaded file into Google Drive following the given hierarchy.
+    hierarchy_list = ["metal", "zinc"] or ["plastic", "pp"]
+    Returns: (file_id, hash_value)
     """
+    if not hierarchy_list or not isinstance(hierarchy_list, list):
+        raise ValueError("Hierarchy must be a non-empty list")
+
     drive = get_drive_client()
+    parent = {"id": DATASET_FOLDER_ID, "title": "root"}
 
-    # Ensure folders exist
-    parent = ensure_drive_folder(drive, DATASET_FOLDER_ID, hierarchy["main"])
-    if hierarchy.get("sub"):
-        parent = ensure_drive_folder(drive, parent["id"], hierarchy["sub"])
-    if hierarchy.get("subsub"):
-        parent = ensure_drive_folder(drive, parent["id"], hierarchy["subsub"])
+    # Traverse hierarchy (create folders if missing)
+    for level in hierarchy_list:
+        parent = ensure_drive_folder(drive, parent["id"], level)
 
+    # Save temp file
     filename = secure_filename(file.filename)
+    os.makedirs("uploads", exist_ok=True)
+    tmp_path = os.path.join("uploads", filename)
+    file.save(tmp_path)
 
-    # Save to tmp for hashing + upload
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        file.save(tmp.name)
-        tmp_path = tmp.name
-
-    hash_value = get_image_hash(tmp_path)
-
+    # Upload to Drive
     file_id = upload_to_drive(drive, parent["id"], tmp_path, filename)
 
-    os.remove(tmp_path)
+    # Compute perceptual hash
+    hash_value = get_image_hash(tmp_path)
+
+    # Cleanup temp file
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
 
     return file_id, hash_value
 
-def remove_duplicate_from_other_categories(db, hash_value, file_id, hierarchy):
+
+def remove_duplicate_from_other_categories(db, hash_value, file_id, hierarchy_list):
     """
-    If duplicate exists in DB → update its category in DB (Drive already holds correct file).
+    Remove duplicates of same hash in other categories.
+    - If duplicate exists in DB under *different hierarchy*, remove it from Drive + DB.
     """
     dataset_images = db["dataset_images"]
-    existing_doc = dataset_images.find_one({"hash": hash_value})
-    if existing_doc:
-        old_hierarchy = existing_doc["hierarchy"]
-        if old_hierarchy == hierarchy:
-            return
+    duplicates = dataset_images.find({"hash": hash_value})
 
-        dataset_images.update_one(
-            {"_id": existing_doc["_id"]},
-            {"$set": {
-                "file_id": file_id,
-                "hierarchy": hierarchy
-            }}
-        )
+    for dup in duplicates:
+        if dup.get("file_id") != file_id:
+            if dup.get("hierarchy") != hierarchy_list:
+                # Delete duplicate file in Drive
+                try:
+                    delete_drive_file(dup["file_id"])
+                except Exception as e:
+                    print(f"⚠️ Could not delete duplicate file from Drive: {e}")
+
+                # Delete duplicate record from DB
+                dataset_images.delete_one({"_id": dup["_id"]})
