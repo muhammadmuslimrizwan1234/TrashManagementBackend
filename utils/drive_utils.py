@@ -9,13 +9,33 @@ from google.oauth2 import service_account
 DATASET_FOLDER_ID = os.getenv("DRIVE_DATASET_ID")
 
 def get_drive_client():
-    """Authenticate and return Google Drive client using service account JSON from env."""
-    service_info = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
-    creds = service_account.Credentials.from_service_account_info(
-        service_info,
-        scopes=["https://www.googleapis.com/auth/drive"]
-    )
-    return build("drive", "v3", credentials=creds)
+    """
+    Returns an authenticated Google Drive API client using the service account JSON
+    stored in the environment variable GOOGLE_SERVICE_ACCOUNT_JSON.
+    """
+    service_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not service_json:
+        raise Exception("❌ GOOGLE_SERVICE_ACCOUNT_JSON not found in environment")
+
+    try:
+        # Parse JSON string from env
+        service_info = json.loads(service_json)
+
+        # Fix private_key newlines (Railway stores \n as literal \\n)
+        if "private_key" in service_info:
+            service_info["private_key"] = service_info["private_key"].replace("\\n", "\n")
+
+        creds = service_account.Credentials.from_service_account_info(
+            service_info,
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+
+        # Build Drive client
+        drive_service = build("drive", "v3", credentials=creds)
+        return drive_service
+
+    except Exception as e:
+        raise Exception(f"❌ Failed to load Google Drive credentials: {str(e)}")
 
 def ensure_drive_folder(drive, parent_id, folder_name):
     """Find or create a folder inside parent folder."""

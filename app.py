@@ -1,6 +1,5 @@
 import os
 import certifi
-import urllib.parse
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -11,7 +10,7 @@ from dotenv import load_dotenv
 # ---------------- Utils ----------------
 from utils.file_utils import save_to_dataset, remove_duplicate_from_other_categories, delete_drive_file, delete_drive_folder
 from utils.category_utils import get_categories
-from models.classifier import predict_image_file
+from models import classifier  # will lazy-load TensorFlow
 
 # ---------------- Load Env ----------------
 load_dotenv()
@@ -27,7 +26,9 @@ DRIVE_DATASET_ID = os.getenv("DRIVE_DATASET_ID")
 
 # ---------------- Flask App ----------------
 app = Flask(__name__)
-CORS(app)
+
+# ✅ Allow CORS from anywhere (fix frontend error)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # ---------------- MongoDB ----------------
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
@@ -36,6 +37,7 @@ preds_col = db["predictions"]
 
 # ---------------- Health ----------------
 @app.route("/health")
+@app.route("/api/health")
 def health():
     return jsonify({"status": "ok"}), 200
 
@@ -54,7 +56,8 @@ def predict():
     file.save(tmp_path)
 
     try:
-        result = predict_image_file(tmp_path)
+        # ✅ Lazy load model inside classifier
+        result = classifier.predict_image_file(tmp_path)
         classification = result["objects"][0]
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -171,7 +174,6 @@ def delete_category():
     if not main:
         return jsonify({"error": "main required"}), 400
 
-    # Build path and resolve folder_id via drive_utils
     from utils.drive_utils import get_drive_client, ensure_drive_folder
     drive = get_drive_client()
 
@@ -192,6 +194,15 @@ def delete_category():
 
     return jsonify({"message": "Category deleted"}), 200
 
+
 # ---------------- Main ----------------
 if __name__ == "__main__":
+    # Warm up the model at startup
+    try:
+        from models.classifier import get_model
+        model, _ = get_model()
+        print("✅ Model loaded into memory at startup.")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not preload model - {e}")
+
     app.run(host="0.0.0.0", port=PORT, debug=DEBUG)
