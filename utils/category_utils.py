@@ -1,17 +1,18 @@
-import os
-
-DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "dataset")
+from utils.drive_utils import get_drive_client, DATASET_FOLDER_ID
 
 def get_categories():
     """
-    Scan dataset/ folder and return hierarchy structure
+    Recursively scan Drive dataset folder.
     """
-    def scan_dir(path):
+    drive = get_drive_client()
+
+    def scan_folder(parent_id):
         out = {}
-        for entry in os.listdir(path):
-            entry_path = os.path.join(path, entry)
-            if os.path.isdir(entry_path):
-                out[entry] = scan_dir(entry_path)
+        query = f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        subfolders = drive.files().list(q=query, fields="files(id, name)").execute().get("files", [])
+
+        for sub in subfolders:
+            out[sub["name"]] = scan_folder(sub["id"])
         return out
 
-    return scan_dir(DATASET_DIR)
+    return scan_folder(DATASET_FOLDER_ID)

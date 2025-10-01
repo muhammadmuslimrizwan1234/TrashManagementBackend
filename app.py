@@ -2,14 +2,14 @@ import os
 import certifi
 import urllib.parse
 from datetime import datetime
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from pymongo import MongoClient
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 
 # ---------------- Utils ----------------
-from utils.file_utils import save_to_dataset, remove_duplicate_from_other_categories
+from utils.file_utils import save_to_dataset, remove_duplicate_from_other_categories, delete_drive_file, delete_drive_folder
 from utils.category_utils import get_categories
 from models.classifier import predict_image_file
 
@@ -17,20 +17,16 @@ from models.classifier import predict_image_file
 load_dotenv()
 
 # ---------------- Config ----------------
-UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-DATASET_FOLDER = os.path.join(os.path.dirname(__file__), "dataset")
-os.makedirs(DATASET_FOLDER, exist_ok=True)
-
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "TrashApp")
 PORT = int(os.getenv("PORT", 5000))
 DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 
+# Dataset root (Google Drive folder ID from env)
+DRIVE_DATASET_ID = os.getenv("DRIVE_DATASET_ID")
+
 # ---------------- Flask App ----------------
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 CORS(app)
 
 # ---------------- MongoDB ----------------
@@ -53,13 +49,13 @@ def predict():
         return jsonify({"error": "No file selected"}), 400
 
     filename = secure_filename(file.filename)
-    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-    saved_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{timestamp}_{filename}")
-    file.save(saved_path)
+    tmp_path = os.path.join("uploads", filename)
+    os.makedirs("uploads", exist_ok=True)
+    file.save(tmp_path)
 
     try:
-        result = predict_image_file(saved_path)
-        classification = result["objects"][0]  # first object
+        result = predict_image_file(tmp_path)
+        classification = result["objects"][0]
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -73,7 +69,6 @@ def predict():
 
     # Save prediction record
     record = {
-        "image_path": saved_path,
         "label": label,
         "hierarchy": hierarchy,
         "confidence": confidence,
@@ -82,17 +77,15 @@ def predict():
     }
     record_id = preds_col.insert_one(record).inserted_id
 
-    # Build response with hierarchy split
     response = {
         "id": str(record_id),
-        "image_url": f"{request.host_url}uploads/{urllib.parse.quote(os.path.basename(saved_path))}",
-        "label": record["label"],
+        "label": label,
         "hierarchy": hierarchy,
         "main_type": hierarchy[0] if len(hierarchy) > 0 else "N/A",
         "sub_type": hierarchy[1] if len(hierarchy) > 1 else "N/A",
         "sub_sub_type": hierarchy[2] if len(hierarchy) > 2 else "N/A",
-        "confidence": round(record["confidence"] * 100, 2),
-        "dominant_color": record["dominant_color"]
+        "confidence": round(confidence * 100, 2),
+        "dominant_color": classification["dominant_color"]
     }
 
     return jsonify(response), 201
@@ -103,7 +96,6 @@ def upload_dataset_image():
     if "files" not in request.files and "file" not in request.files:
         return jsonify({"error": "No file(s) uploaded"}), 400
 
-    # Support both single and multiple uploads
     files = request.files.getlist("files") if "files" in request.files else [request.files["file"]]
 
     hierarchy = {
@@ -117,19 +109,11 @@ def upload_dataset_image():
 
     results = []
     for file in files:
-        final_path, hash_value = save_to_dataset(file, hierarchy)
+        file_id, hash_value = save_to_dataset(file, hierarchy)
+        remove_duplicate_from_other_categories(db, hash_value, file_id, hierarchy)
 
-        # ✅ handle duplicates across categories
-        remove_duplicate_from_other_categories(db, hash_value, final_path, hierarchy)
-
-        # prepare paths
-        rel_path = os.path.relpath(final_path, DATASET_FOLDER).replace(os.sep, "/")
-        encoded_path = urllib.parse.quote(rel_path, safe="/")
-
-        # save record
         record = {
-            "path": final_path,
-            "rel_path": rel_path,
+            "file_id": file_id,
             "hierarchy": hierarchy,
             "hash": hash_value,
             "uploaded_by": request.form.get("user", "admin"),
@@ -139,8 +123,8 @@ def upload_dataset_image():
 
         results.append({
             "message": "Image added",
-            "path": final_path,
-            "image_url": f"{request.host_url}dataset/{encoded_path}",
+            "file_id": file_id,
+            "image_url": f"https://drive.google.com/uc?id={file_id}",
             "hierarchy": hierarchy
         })
 
@@ -159,10 +143,22 @@ def categories():
 def list_dataset_images():
     images = list(db["dataset_images"].find({}, {"_id": 0}))
     for img in images:
-        if "rel_path" in img:
-            encoded_path = urllib.parse.quote(img["rel_path"], safe="/")
-            img["image_url"] = f"{request.host_url}dataset/{encoded_path}"
+        if "file_id" in img:
+            img["image_url"] = f"https://drive.google.com/uc?id={img['file_id']}"
     return jsonify({"count": len(images), "images": images}), 200
+
+# Delete dataset image by hash
+@app.route("/api/delete_dataset_image/<hash_value>", methods=["DELETE"])
+def delete_dataset_image(hash_value):
+    doc = db["dataset_images"].find_one({"hash": hash_value})
+    if not doc:
+        return jsonify({"error": "Image not found"}), 404
+
+    if "file_id" in doc:
+        delete_drive_file(doc["file_id"])
+
+    db["dataset_images"].delete_one({"hash": hash_value})
+    return jsonify({"message": "Image deleted"}), 200
 
 # Delete category
 @app.route("/api/delete_category", methods=["POST"])
@@ -175,15 +171,18 @@ def delete_category():
     if not main:
         return jsonify({"error": "main required"}), 400
 
-    folder = os.path.join(DATASET_FOLDER, main)
-    if sub:
-        folder = os.path.join(folder, sub)
-    if subsub:
-        folder = os.path.join(folder, subsub)
+    # Build path and resolve folder_id via drive_utils
+    from utils.drive_utils import get_drive_client, ensure_drive_folder
+    drive = get_drive_client()
 
-    if os.path.exists(folder):
-        import shutil
-        shutil.rmtree(folder)
+    parent = ensure_drive_folder(drive, DRIVE_DATASET_ID, main)
+    target = parent
+    if sub:
+        target = ensure_drive_folder(drive, parent["id"], sub)
+    if subsub:
+        target = ensure_drive_folder(drive, target["id"], subsub)
+
+    delete_drive_folder(target["id"])
 
     db["dataset_images"].delete_many({
         "hierarchy.main": main,
@@ -192,29 +191,6 @@ def delete_category():
     })
 
     return jsonify({"message": "Category deleted"}), 200
-
-# Delete dataset image by hash
-@app.route("/api/delete_dataset_image/<hash_value>", methods=["DELETE"])
-def delete_dataset_image(hash_value):
-    doc = db["dataset_images"].find_one({"hash": hash_value})
-    if not doc:
-        return jsonify({"error": "Image not found"}), 404
-
-    if os.path.exists(doc["path"]):
-        os.remove(doc["path"])
-    db["dataset_images"].delete_one({"hash": hash_value})
-
-    return jsonify({"message": "Image deleted"}), 200
-
-# ---------------- Serve uploaded images ----------------
-@app.route("/uploads/<path:filename>")
-def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
-
-# dataset images
-@app.route("/dataset/<path:filename>")
-def dataset_file(filename):
-    return send_from_directory(DATASET_FOLDER, filename)
 
 # ---------------- Main ----------------
 if __name__ == "__main__":
