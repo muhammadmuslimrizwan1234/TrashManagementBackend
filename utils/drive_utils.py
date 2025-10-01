@@ -7,6 +7,21 @@ from google.oauth2 import service_account
 
 # Dataset root folder
 DATASET_FOLDER_ID = os.getenv("DRIVE_DATASET_ID")
+def list_drive_folders(drive, parent_id):
+    """
+    List all subfolders inside a parent folder.
+    Returns: [{ "id": <folder_id>, "title": <folder_name> }, ...]
+    """
+    query = f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    try:
+        results = drive.files().list(
+            q=query,
+            fields="files(id, name)"
+        ).execute()
+        return [{"id": f["id"], "title": f["name"]} for f in results.get("files", [])]
+    except Exception as e:
+        print(f"⚠️ Error listing folders in {parent_id}: {e}")
+        return []
 
 def get_drive_client():
     """
