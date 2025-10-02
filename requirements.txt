@@ -1,4 +1,4 @@
--r constraints.txt
+-r ./constraints.txt
 
 gdown
 
