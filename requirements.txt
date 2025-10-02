@@ -5,9 +5,10 @@ flask==2.3.3
 flask-cors==4.0.0
 gunicorn==21.2.0
 
-mega.py==1.0.8
-  # force override
 
+
+mega.py-reborn==1.0.0
+tenacity==9.1.2
 # Image & ML
 opencv-python-headless==4.8.1.78
 pillow==9.5.0

@@ -1,5 +1,5 @@
 import os
-from mega import Mega
+from mega.reborn import Mega
 import time
 
 # ------------------------------

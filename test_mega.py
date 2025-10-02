@@ -1,4 +1,4 @@
-from mega import Mega
+from mega.reborn import Mega
 import os
 
 def get_dataset_folder(client):
