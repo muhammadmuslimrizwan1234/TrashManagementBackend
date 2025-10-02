@@ -5,7 +5,7 @@ flask==2.3.3
 flask-cors==4.0.0
 gunicorn==21.2.0
 
-mega.py==1.0.8
+
 tenacity==9.1.2    # force override
 
 # Image & ML
