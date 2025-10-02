@@ -7,7 +7,7 @@ gunicorn==21.2.0
 
 
 
-mega.py-reborn==1.0.0
+git+https://github.com/tonikelope/megapy-reborn.git@master
 tenacity==9.1.2
 # Image & ML
 opencv-python-headless==4.8.1.78
