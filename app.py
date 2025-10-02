@@ -6,36 +6,46 @@ from flask_cors import CORS
 from pymongo import MongoClient
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
-
+from bson import ObjectId
+from utils.file_utils import remove_duplicate_from_other_categories
+import traceback
+from utils.db_utils import save_to_mongo
 # ---------------- Utils ----------------
+from utils.db_utils import save_to_mongo
 from utils.category_utils import get_categories
-from utils.file_utils import save_to_dataset, remove_duplicate_from_other_categories
-from utils.drive_utils import delete_drive_file
-
-from models import classifier  # will lazy-load TensorFlow
+from utils.mega_utils import (
+    get_mega_client,
+    upload_to_mega,
+    delete_mega_file,
+)
+from models import classifier  # ML model (lazy-loaded)
 
 # ---------------- Load Env ----------------
 load_dotenv()
 
-# ---------------- Config ----------------
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "TrashApp")
 PORT = int(os.getenv("PORT", 5000))
 DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 
-# Dataset root (Google Drive folder ID from env)
-DRIVE_DATASET_ID = os.getenv("DRIVE_DATASET_ID")
+# ✅ Mega credentials
+MEGA_EMAIL = os.getenv("MEGA_EMAIL")
+MEGA_PASSWORD = os.getenv("MEGA_PASSWORD")
 
 # ---------------- Flask App ----------------
 app = Flask(__name__)
 
-# ✅ Allow CORS from anywhere (fix frontend error)
+# ✅ Allow CORS from anywhere
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # ---------------- MongoDB ----------------
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client[DB_NAME]
 preds_col = db["predictions"]
+dataset_col = db["dataset_images"]
+
+# ---------------- Mega Client ----------------
+mega_client = get_mega_client(MEGA_EMAIL, MEGA_PASSWORD)  # ✅ pass credentials
 
 # ---------------- Health ----------------
 @app.route("/health")
@@ -43,45 +53,62 @@ preds_col = db["predictions"]
 def health():
     return jsonify({"status": "ok"}), 200
 
+
 # ---------------- Predict ----------------
 @app.route("/api/predict", methods=["POST"])
 def predict():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
+
     file = request.files["file"]
     if file.filename == "":
         return jsonify({"error": "No file selected"}), 400
 
+    # Save temp file
     filename = secure_filename(file.filename)
-    tmp_path = os.path.join("uploads", filename)
     os.makedirs("uploads", exist_ok=True)
+    tmp_path = os.path.join("uploads", filename)
     file.save(tmp_path)
 
     try:
-        # ✅ Lazy load model inside classifier
+        # ✅ Run classifier
         result = classifier.predict_image_file(tmp_path)
         classification = result["objects"][0]
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    # Handle low confidence
+    # --- Upload to Mega (uploads folder) ---
+    try:
+        from utils.mega_utils import upload_prediction_to_mega
+        file_id = upload_prediction_to_mega(mega_client, tmp_path)
+    except Exception as e:
+        print(f"⚠️ Mega upload failed: {e}")
+        file_id = None
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    # --- Prepare DB record ---
     label = classification["label"]
     confidence = float(classification["confidence"])
     if confidence < 0.6:
         label = "Unknown"
 
     hierarchy = classification.get("hierarchy", [])
+    if not hierarchy:
+        hierarchy = ["Unknown"]
 
-    # Save prediction record
     record = {
         "label": label,
         "hierarchy": hierarchy,
         "confidence": confidence,
         "dominant_color": classification["dominant_color"],
-        "timestamp": datetime.utcnow()
+        "timestamp": datetime.utcnow(),
+        "file_id": file_id  # ✅ only file_id stored now
     }
     record_id = preds_col.insert_one(record).inserted_id
 
+    # --- Response ---
     response = {
         "id": str(record_id),
         "label": label,
@@ -90,105 +117,156 @@ def predict():
         "sub_type": hierarchy[1] if len(hierarchy) > 1 else "N/A",
         "sub_sub_type": hierarchy[2] if len(hierarchy) > 2 else "N/A",
         "confidence": round(confidence * 100, 2),
-        "dominant_color": classification["dominant_color"]
+        "dominant_color": classification["dominant_color"],
+        "file_id": file_id
     }
 
     return jsonify(response), 201
 
-# ---------------- Dataset Management ----------------
-# ---------------- Dataset Management ----------------
+
+# ---------------- Upload Dataset ----------------
+# ---------------- Upload Dataset ----------------
 @app.route("/api/upload_dataset_image", methods=["POST"])
 def upload_dataset_image():
-    if "files" not in request.files and "file" not in request.files:
-        return jsonify({"error": "No file(s) uploaded"}), 400
+    try:
+        print("📥 Incoming Upload Request")
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
 
-    # Support multiple or single file
-    files = request.files.getlist("files") if "files" in request.files else [request.files["file"]]
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
 
-    # Convert form hierarchy to list
-    hierarchy_list = [h for h in [
-        request.form.get("main"),
-        request.form.get("sub"),
-        request.form.get("subsub")
-    ] if h]
+        hierarchy = request.form.get("hierarchy")
+        if not hierarchy:
+            return jsonify({"error": "Missing 'hierarchy' field"}), 400
 
-    if not hierarchy_list:
-        return jsonify({"error": "At least one category (main) required"}), 400
+        hierarchy = hierarchy.split("/") if "/" in hierarchy else [hierarchy]
+        print(f"✅ Final hierarchy to use: {hierarchy}")
 
-    results = []
-    for file in files:
+        os.makedirs("temp_uploads", exist_ok=True)
+        temp_path = os.path.join("temp_uploads", file.filename)
+        file.save(temp_path)
+        print(f"💾 Saved temp file: {temp_path}")
+
+        # Compute hash BEFORE deleting
+        import hashlib
+        with open(temp_path, "rb") as f:
+            file_bytes = f.read()
+            file_hash = hashlib.md5(file_bytes).hexdigest()
+
+        # ⬆️ Upload to Mega
+        result = upload_to_mega(mega_client, hierarchy, temp_path)
+
         try:
-            print(f"📂 Uploading file: {file.filename} → hierarchy: {hierarchy_list}")
+            os.remove(temp_path)
+        except:
+            pass
 
-            # Save to Drive
-            file_id, hash_value = save_to_dataset(file, hierarchy_list)
-            print(f"✅ File uploaded to Drive. ID={file_id}, hash={hash_value}")
+        if not result:
+            return jsonify({"error": "Upload failed"}), 500
 
-            # Remove duplicates if needed
-            remove_duplicate_from_other_categories(db, hash_value, file_id, hierarchy_list)
+        # ✅ Save metadata to MongoDB
+        # ✅ Save metadata to MongoDB
+        record = {
+            "id": result.get("file_id"),
+            "name": result.get("name"),
+            "hierarchy": hierarchy,
+            "size": result.get("size"),
+            "link": result.get("link"),
+            "hash": file_hash,
+            "timestamp": datetime.utcnow(),
+        }
+        record = save_to_mongo(record)  # this will auto attach _id
+        return jsonify(record), 200
 
-            # Save record in MongoDB
-            record = {
-                "file_id": file_id,
-                "hierarchy": hierarchy_list,
-                "hash": hash_value,
-                "uploaded_by": request.form.get("user", "admin"),
-                "timestamp": datetime.utcnow()
-            }
-            db["dataset_images"].insert_one(record)
-            print(f"🗄️ Mongo record inserted: {record}")
 
-            results.append({
-                "message": "Image added",
-                "file_id": file_id,
-                "image_url": f"https://drive.google.com/uc?id={file_id}",
-                "hierarchy": hierarchy_list
-            })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
-        except Exception as e:
-            print(f"❌ Error uploading {file.filename}: {e}")
-            results.append({
-                "message": f"Failed to upload {file.filename}",
-                "error": str(e)
-            })
 
-    return jsonify({
-        "uploaded": len([r for r in results if "file_id" in r]),
-        "results": results
-    }), 201
-
-# ---------------- Get Categories ----------------
 @app.route("/api/categories", methods=["GET"])
 def categories():
     try:
-        cats = get_categories()
-        return jsonify({"categories": cats}), 200
+        cats = get_categories(mega_client)   # ✅ pass the global client
+        return jsonify(cats), 200
     except Exception as e:
-        print("❌ Error in /api/categories:", str(e))
         return jsonify({"error": str(e)}), 500
 
-# List dataset images
+
+# ---------------- List Dataset ----------------
+# ---------------- List Dataset ----------------
 @app.route("/api/dataset_images", methods=["GET"])
 def list_dataset_images():
-    images = list(db["dataset_images"].find({}, {"_id": 0}))
-    for img in images:
-        if "file_id" in img:
-            img["image_url"] = f"https://drive.google.com/uc?id={img['file_id']}"
-    return jsonify({"count": len(images), "images": images}), 200
+    try:
+        dataset_folder = mega_client.find("dataset")
+        print("🔍 dataset_folder from Mega:", dataset_folder)
 
-# Delete dataset image by hash
-@app.route("/api/delete_dataset_image/<hash_value>", methods=["DELETE"])
-def delete_dataset_image(hash_value):
-    doc = db["dataset_images"].find_one({"hash": hash_value})
-    if not doc:
-        return jsonify({"error": "Image not found"}), 404
+        if not dataset_folder:
+            return jsonify({"error": "dataset folder not found"}), 404
 
-    if "file_id" in doc:
-        delete_drive_file(doc["file_id"])
+        # ✅ Normalize dataset folder id
+        if isinstance(dataset_folder, dict) and "h" in dataset_folder:
+            dataset_id = dataset_folder["h"]
+        elif isinstance(dataset_folder, list) and len(dataset_folder) > 0 and "h" in dataset_folder[0]:
+            dataset_id = dataset_folder[0]["h"]
+        elif isinstance(dataset_folder, str):
+            dataset_id = dataset_folder
+        elif isinstance(dataset_folder, tuple) and len(dataset_folder) == 2:
+            # Mega sometimes returns (id, metadata)
+            dataset_id = dataset_folder[0]
+        else:
+            return jsonify({
+                "error": f"Unexpected dataset folder format: {dataset_folder}"
+            }), 500
 
-    db["dataset_images"].delete_one({"hash": hash_value})
-    return jsonify({"message": "Image deleted"}), 200
+        # ✅ Get files under dataset folder
+        files = mega_client.get_files_in_node(dataset_id) or {}
+        print("📂 Files found in dataset:", files)
 
+        response = []
+        for file_id, file_info in files.items():
+            if file_info.get("t") == 0:  # 0 = file
+                try:
+                    link = mega_client.export(file_id)
+                except Exception as e:
+                    print(f"⚠️ Export failed for {file_id}: {e}")
+                    link = None
+                response.append({
+                    "file_id": file_id,
+                    "name": file_info.get("a", {}).get("n", "unknown"),
+                    "size": file_info.get("s"),
+                    "link": link,
+                })
+
+        return jsonify(response), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+# ---------------- Delete Dataset Image ----------------
+@app.route("/api/delete_dataset_image/<file_id>", methods=["DELETE"])
+def delete_dataset_image(file_id):
+    try:
+        print(f"🗑️ Deleting file {file_id} from Mega...")
+        mega_client.destroy(file_id)
+
+        # ✅ Delete metadata from MongoDB
+        from utils.db_utils import delete_from_mongo
+        deleted = delete_from_mongo(file_id)
+
+        if deleted == 0:
+            return jsonify({"warning": f"No MongoDB record found for {file_id}"}), 200
+
+        return jsonify({"message": f"File {file_id} deleted from Mega and MongoDB"}), 200
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------- Delete Category ----------------
 @app.route("/api/delete_category", methods=["POST"])
 def delete_category():
     data = request.json
@@ -197,40 +275,20 @@ def delete_category():
     if not hierarchy or not isinstance(hierarchy, list):
         return jsonify({"error": "Hierarchy list required"}), 400
 
-    from utils.drive_utils import get_drive_client, ensure_drive_folder, delete_drive_folder
-    drive = get_drive_client()
-
     try:
-        parent = {"id": DRIVE_DATASET_ID}
-        target = None
-
-        # Traverse until last level
-        for level in hierarchy:
-            target = ensure_drive_folder(drive, parent["id"], level)
-            parent = target
-
-        if not target:
-            return jsonify({"error": "Target folder not found"}), 404
-
-        # ❌ Only delete the last folder in hierarchy
-        delete_drive_folder(target["id"])
-
-        # 🗑 Delete DB entries for this exact hierarchy
-        db["dataset_images"].delete_many({"hierarchy": hierarchy})
-
+        # For simplicity: just delete all DB entries under that hierarchy
+        dataset_col.delete_many({"hierarchy": hierarchy})
         return jsonify({
             "message": "Deleted last category",
             "deleted": hierarchy[-1],
             "parent": hierarchy[:-1] if len(hierarchy) > 1 else None
         }), 200
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 # ---------------- Main ----------------
 if __name__ == "__main__":
-    # Warm up the model at startup
     try:
         from models.classifier import get_model
         model, _ = get_model()
