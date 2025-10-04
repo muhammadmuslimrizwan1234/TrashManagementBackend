@@ -1,54 +1,14 @@
-from mega import Mega
-import os
+import dropbox
 
-def get_dataset_folder(client):
-    """
-    Manually scan all folders to find 'dataset' (case-insensitive).
-    """
-    files = client.get_files()
-    for fid, meta in files.items():
-        if meta.get("t") == 1:  # folder
-            folder_name = meta.get("a", {}).get("n")
-            print(f"📂 Found folder: {folder_name} ({fid})")
-            if folder_name and folder_name.lower() == "dataset":
-                print(f"✅ Using dataset folder: {folder_name} ({fid})")
-                return fid
-    raise Exception("❌ 'dataset' root folder not found in Mega. Please create it manually.")
+# Paste your access token here
+ACCESS_TOKEN = "sl.u.AGBWX4CRPlzdidYVnOJJCPplcPUWEtsP2jy_cNcrL-9ZfbGrWZ22s0KbkWZUVwdlYhq5A2OMeNbutGoq1e7biYjE6CbipyjBx8q0My1Ne90cgyMN66DGY52OBHFlYYUVHuW1Y0cVCAM4Hv_totE2K_QvU8odW1Qqdqx6_zPgDR4fgU77ZGChxQkLs6C3lXLrLWHkiSnqU8goptz4__9Ipf7Zsp_5fOQZCZyEjOLU5qPYwwFYd1sD2pBhhwGsWcoJXZiV5cHrXeIwXSAWcXrR9hJATYl--xAgvCOOC-vVXCekKY18Kof8LdHP7UJr3ed2KHOUt_hzgAkMNadavFSaMR2QVQ-zbYDfOrtkZN1FO_un02pHHBvpgVYOUpebKfvaVP1XAkLxdazUAOU_74nKhXFZb6CGLZV3sXXsUHnNm6RncZ2UmEQYGS9MvDM5XkCep1t504qsKLczdyiC5R66Xq5g0uAXtF0oPCnqLZ2SLX4TX3LGR4W-bIVyYuUNEc7FJVbTG9c40eGJRRxsvqfBtwA9M1r2LNNVWQy389EAcA0BSqe0-AIvyd7ZaD2nDQL-DS1i_itjiqvi3HTTN_DK46DvwRDsnj8riX321h4Ai0JfiJLkenPdG-_2dHITDaDaM2e3xQw-4ypM6WMXk_biDKhLZK3KJDij7IU-7WAxwfScmJPFs5GB9HZ3ULrTIfuSVL0UDSLCqIYFZF8IT3IT1fpcuOMkbKaL6v9lr1kBVDIpwhdJKHU8jF1TBnAyLVsB-2jznmsnYOe1wXvSHmle6zIm7p8651wwX7PHtToW6sls1RP_jyULR3JdFif6eL_QrL7WGg-jpav-K9MOQvc7ihqU8OG1AW-oOJRmeIIab8Am5nV0lvFw4rQJZoVqoTqF1NrZEoU__9llg7ROSPQJLEZgA4OBo2-YpdxuD1FCf-1gwkGlIDwj6two0wkmxexAG40XOIr_HCdlxMuD2lvmAiRquDq1FzsdsngMya5cTnrolVf7gK5h70wVh2SAFj9B5VtbvWBzhbBbeDwnFpQhyMbVPveKs2se-13n9oVifioQI943p0hc6idkoBVdGaliHpqsEsqs-8j__gAWg9macHvq1hkVa_0UljbTn2URO5I0PuqhlMha7QEcKXir2hQ5Z7e8lx5RpxurqGG0zy5VdulSknZr_oYqGP7znzJ9Nu--MLwg43PzJ3GcdZyJNextofJyMg48O68PpK6qtBcZnQjO5vd5RepKvqlMvGnJ35mAbWeuJh5Odsozqy-K50JXtHtTrJ1s-mZYMDq3S2MysIJOv580vs9RQTdfjOpWTGJrl4IshL71A8ilJQxWsWk0HS2gyXoL5PCcsmIRr5ErOUep6h91h1pMc8ekLn5bJOX1PWLTkNVnlDsqkLEJPM94rU4-DJ5-vdGBwmE1KiCyS9Vi81LYVIE_2ac2tiUm-XsRNg"
 
-def main():
-    print("🔑 Logging in to Mega...")
-    mega = Mega()
-    client = mega.login("muslim.rizwan12@gmail.com", "muslim123")  # put creds here
+dbx = dropbox.Dropbox(ACCESS_TOKEN)
 
-    # Create a test file
-    with open("temp_test.txt", "w", encoding="utf-8") as f:
-        f.write("This is a Mega upload test")
+# Upload a file
+with open("Glass_14.jpg", "rb") as f:
+    dbx.files_upload(f.read(), "/uploads/example.jpg", mode=dropbox.files.WriteMode.overwrite)
 
-    print("\n📤 Uploading temp_test.txt to Mega under hierarchy ['cardboard']...")
-    dataset_id = get_dataset_folder(client)
-
-    print("☁️ Starting Mega upload...")
-    try:
-        # ensure "cardboard" subfolder exists
-        files = client.get_files()
-        cardboard_id = None
-        for fid, meta in files.items():
-            if meta.get("t") == 1 and meta.get("p") == dataset_id:  # folder inside dataset
-                folder_name = meta.get("a", {}).get("n")
-                if folder_name and folder_name.lower() == "cardboard":
-                    cardboard_id = fid
-                    break
-
-        if cardboard_id is None:
-            print("📂 Creating 'cardboard' folder inside dataset...")
-            cardboard_id = client.create_folder("cardboard", dataset_id)["f"][0]["h"]
-
-        # upload file into cardboard
-        client.upload("temp_test.txt", cardboard_id)
-        print("✅ Upload successful!")
-
-    except Exception as e:
-        print(f"❌ Upload error: {e}")
-
-if __name__ == "__main__":
-    main()
+# Create a shared link
+link = dbx.sharing_create_shared_link_with_settings("/uploads/example.jpg")
+print("Link:", link.url)

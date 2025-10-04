@@ -1,11 +1,7 @@
-gdown
-
 # Web framework
 flask==2.3.3
 flask-cors==4.0.0
 gunicorn==21.2.0
-
-mega.py==1.0.8
 
 # Image & ML
 opencv-python-headless==4.8.1.78
@@ -27,3 +23,5 @@ google-api-python-client==2.95.0
 google-auth==2.23.2
 google-auth-httplib2==0.1.1
 google-auth-oauthlib==0.4.6
+
+dropbox

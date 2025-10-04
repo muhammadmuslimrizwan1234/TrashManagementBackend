@@ -1,57 +1,41 @@
 # utils/category_utils.py
+import dropbox
+from dropbox.files import FolderMetadata, FileMetadata
 
-def _build_tree_from_maps(parent_map, files_map, node_id):
-    """Recursively build folder tree using parent_map and files_map starting at node_id."""
-    tree = {}
-    for (child_id, meta) in parent_map.get(node_id, []):
-        # meta['t'] == 1 -> folder; meta['a'] contains attributes with 'n' = name
-        if meta.get("t") == 1 and "a" in meta:
-            name = meta["a"].get("n")
-            if not name:
-                continue
-            tree[name] = _build_tree_from_maps(parent_map, files_map, child_id)
-    return tree
-
-
-def get_categories(client, dataset_folder_name="dataset"):
+def _build_tree_from_dropbox(dbx, folder_path):
     """
-    Return nested categories from Mega inside the folder named `dataset_folder_name`.
-    If dataset folder is not found, returns actual top-level folders found in Mega root.
+    Recursively builds a nested dictionary of folders in Dropbox starting at folder_path
     """
-    # ✅ use the already-authenticated client from app.py
-    files = client.get_files()  # mapping node_id -> meta
-
-    # build parent map: parent_id -> list of (child_id, meta)
-    parent_map = {}
-    for fid, meta in files.items():
-        parent = meta.get("p")
-        parent_map.setdefault(parent, []).append((fid, meta))
-
-    # find dataset folder id (case-insensitive)
-    dataset_id = None
-    for fid, meta in files.items():
-        if meta.get("t") == 1 and "a" in meta:
-            name = meta["a"].get("n", "")
-            if name and name.lower() == dataset_folder_name.lower():
-                dataset_id = fid
-                break
-
-    if dataset_id:
-        return _build_tree_from_maps(parent_map, files, dataset_id)
-
-    # fallback: top-level folders
-    roots = []
-    for fid, meta in files.items():
-        parent = meta.get("p")
-        if parent is None or parent not in files:
-            roots.append((fid, meta))
-
     tree = {}
-    for fid, meta in roots:
-        if meta.get("t") == 1 and "a" in meta:
-            name = meta["a"].get("n")
-            if not name:
-                continue
-            tree[name] = _build_tree_from_maps(parent_map, files, fid)
+    try:
+        res = dbx.files_list_folder(folder_path)
+        entries = res.entries
 
-    return tree
+        while res.has_more:
+            res = dbx.files_list_folder_continue(res.cursor)
+            entries.extend(res.entries)
+
+        for entry in entries:
+            if isinstance(entry, FolderMetadata):
+                tree[entry.name] = _build_tree_from_dropbox(dbx, entry.path_lower)
+        return tree
+    except Exception as e:
+        print(f"❌ Failed to list folder {folder_path}: {e}")
+        return {}
+
+def get_categories(dbx, dataset_folder="/waste2worth/dataset"):
+    """
+    Returns nested categories from Dropbox starting at `dataset_folder`.
+    If dataset folder does not exist, returns top-level folders in Dropbox root.
+    """
+    try:
+        # Check if dataset folder exists
+        try:
+            dbx.files_get_metadata(dataset_folder)
+            return _build_tree_from_dropbox(dbx, dataset_folder)
+        except dropbox.exceptions.ApiError:
+            print(f"⚠ Dataset folder not found: {dataset_folder}. Using root folder instead.")
+            return _build_tree_from_dropbox(dbx, "")
+    except Exception as e:
+        print(f"❌ get_categories error: {e}")
+        return {}

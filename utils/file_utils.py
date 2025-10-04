@@ -4,7 +4,6 @@ import hashlib
 import traceback
 import tempfile
 from bson import ObjectId
-from utils.mega_utils import get_mega_client, delete_mega_file, _find_or_create_folder
 
 # ------------------------------
 # Hashing Utilities
